@@ -16,6 +16,17 @@ function promisifyChromeCall (call) {
   })
 }
 
+function listenUntilResolved (target, eventName, fn) {
+  return new Promise((resolve) => {
+    target.addEventListener(eventName, function listener (event) {
+      fn(event, (result) => {
+        target.removeEventListener(eventName, listener)
+        resolve(result)
+      })
+    })
+  })
+}
+
 exports.getBackgroundPage = function () {
   if (hasBrowserGlobal) {
     return browser.runtime.getBackgroundPage()
@@ -32,6 +43,7 @@ exports.getBackgroundPage = function () {
   throw new Error('Unsupported platform')
 }
 
+let nextReturnId = 0
 exports.sendMessage = function (message) {
   if (hasBrowserGlobal) {
     return browser.runtime.sendMessage(message)
@@ -43,17 +55,16 @@ exports.sendMessage = function (message) {
 
   if (hasSafariGlobal) {
     if (safari.self.tab) {
-      // FIXME: Handle sending return value back
-      // safari.self.tab.dispatchMessage('wext-runtime-message', message)
-      throw new Error('Not implemented')
+      const returnId = `wext-runtime-response-${nextReturnId++}`
+      safari.self.tab.dispatchMessage('wext-runtime-message', { message, returnId })
+
+      return listenUntilResolved(safari.self, 'message', (ev, resolve) => {
+        if (ev.name === returnId) resolve(ev.message)
+      })
     } else {
       const win = safari.extension.globalPage.contentWindow
 
-      if (typeof win.__wext_runtime_message__ === 'function') {
-        return new Promise((resolve, reject) => win.__wext_runtime_message__(message).then(resolve, reject))
-      } else {
-        return Promise.resolve()
-      }
+      return Promise.resolve(typeof win.__wext_runtime_message__ === 'function' ? win.__wext_runtime_message__(message) : undefined)
     }
   }
 
@@ -71,7 +82,7 @@ if (hasChromeGlobal) {
 if (hasSafariGlobal) {
   const listeners = new Set()
 
-  window.__wext_runtime_message__ = (message) => {
+  const receiveMessage = (message) => {
     return new Promise((resolve) => {
       let isAsync = false
 
@@ -83,12 +94,20 @@ if (hasSafariGlobal) {
     })
   }
 
-  // FIXME: Handle sending return value back
-  // safari.application.addEventListener('message', (ev) => {
-  //   if (ev.name === 'wext-runtime-message') {
-  //     listeners.forEach(fn => fn(ev.target, ...))
-  //   }
-  // })
+  // Calling window.__wext_runtime_message__ from an safari.application
+  // event listener sometimes crashes safari. That's why receiveMessage
+  // is a separate function, instead of inlined here.
+  window.__wext_runtime_message__ = (message) => receiveMessage(message)
+
+  if (typeof safari.application === 'object') {
+    safari.application.addEventListener('message', (ev) => {
+      if (ev.name !== 'wext-runtime-message') return
+
+      receiveMessage(ev.message.message).then((result) => {
+        ev.target.page.dispatchMessage(ev.message.returnId, result)
+      })
+    })
+  }
 
   exports.onMessage = {
     addListener (fn) { listeners.add(fn) },
