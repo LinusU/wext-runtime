@@ -4,7 +4,7 @@ export { getBackgroundPage }
 declare function sendMessage<T = void> (message: any): Promise<T>
 export { sendMessage }
 
-export interface Event<T extends () => void> {
+export interface Event<T extends Function> {
   addListener (callback: T): void
   hasListener (callback: T): boolean
   removeListener (callback: T): void
