@@ -4,6 +4,27 @@ const hasBrowserGlobal = (typeof browser === 'object')
 const hasChromeGlobal = (typeof chrome === 'object')
 const hasSafariGlobal = (typeof safari === 'object')
 
+const safariContext = (function () {
+  if (!hasSafariGlobal) return null
+
+  /* global SafariExtensionGlobalPage */
+  if (typeof SafariExtensionGlobalPage !== 'undefined' && safari.self instanceof SafariExtensionGlobalPage) {
+    return 'background-script'
+  }
+
+  /* global SafariExtensionPopover */
+  if (typeof SafariExtensionPopover !== 'undefined' && safari.self instanceof SafariExtensionPopover) {
+    return 'popup-script'
+  }
+
+  /* global SafariContentWebPage */
+  if (typeof SafariContentWebPage !== 'undefined' && safari.self instanceof SafariContentWebPage) {
+    return 'content-script'
+  }
+
+  throw new Error('Unknown Safari context')
+}())
+
 function promisifyChromeCall (call) {
   return new Promise((resolve, reject) => {
     call((result) => {
@@ -54,17 +75,23 @@ exports.sendMessage = function (message) {
   }
 
   if (hasSafariGlobal) {
-    if (safari.self.tab) {
+    if (safariContext === 'content-script') {
       const returnId = `wext-runtime-response-${nextReturnId++}`
-      safari.self.tab.dispatchMessage('wext-runtime-message', { message, returnId })
+      safari.self.tab.dispatchMessage('wext-runtime-message', { message, returnId, sendingContext: safariContext })
 
       return listenUntilResolved(safari.self, 'message', (ev, resolve) => {
         if (ev.name === returnId) resolve(ev.message)
       })
-    } else {
+    }
+
+     if (safariContext === 'popup-script') {
       const win = safari.extension.globalPage.contentWindow
 
       return Promise.resolve(typeof win.__wext_runtime_message__ === 'function' ? win.__wext_runtime_message__(message) : undefined)
+    }
+
+    if (safariContext === 'background-script') {
+      throw new Error('Sending from global page is not yet implemented')
     }
   }
 
@@ -103,9 +130,25 @@ if (hasSafariGlobal) {
     safari.application.addEventListener('message', (ev) => {
       if (ev.name !== 'wext-runtime-message') return
 
-      receiveMessage(ev.message.message).then((result) => {
-        ev.target.page.dispatchMessage(ev.message.returnId, result)
-      })
+      switch (`${ev.message.sendingContext} -> ${safariContext}`) {
+        case 'background-script -> content-script':
+          throw new Error('Receiving a message from `tabs.sendMessage()` not yet implemented')
+
+        case 'content-script -> background-script':
+          receiveMessage(ev.message.message).then((result) => {
+            ev.target.page.dispatchMessage(ev.message.returnId, result)
+          })
+          break
+
+        case 'background-script -> popup-script':
+          throw new Error('Sending from global page is not yet implemented')
+
+        case 'popup-script -> background-script':
+          receiveMessage(ev.message.message).then((result) => {
+            ev.target.page.dispatchMessage(ev.message.returnId, result)
+          })
+          break
+      }
     })
   }
 
